@@ -29,6 +29,7 @@ export function up(db: Database.Database): void {
         ON streams(start_at);
   `);
 
+  // eslint-disable-next-line no-console -- CLI tool output when run directly via ts-node
   console.log("[migration] 0002_add_stream_indexes: indexes applied.");
 }
 
