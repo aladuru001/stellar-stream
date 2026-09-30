@@ -202,13 +202,17 @@ export async function verifyChallengeAndIssueToken(
 
     // Validate timestamp and nonce for replay attack prevention
     if (timestampOp?.value && nonceOp?.value) {
-      // The value can be either a Uint8Array directly or a DataValue/BytesValue object with a .value property
-      const timestampBytes = timestampOp.value instanceof Uint8Array
-        ? timestampOp.value
-        : timestampOp.value.value;
-      const nonceBytes = nonceOp.value instanceof Uint8Array
-        ? nonceOp.value
-        : nonceOp.value.value;
+      // The value can be either a Uint8Array directly or a DataValue/BytesValue object with a .value
+      // property, depending on the stellar-sdk version. The installed types only describe the Buffer
+      // case, so widen locally to keep the runtime fallback for the wrapper-object case.
+      const timestampValue = timestampOp.value as Buffer | { value: Uint8Array };
+      const nonceValue = nonceOp.value as Buffer | { value: Uint8Array };
+      const timestampBytes = timestampValue instanceof Uint8Array
+        ? timestampValue
+        : timestampValue.value;
+      const nonceBytes = nonceValue instanceof Uint8Array
+        ? nonceValue
+        : nonceValue.value;
       const timestampStr = Buffer.from(timestampBytes).toString('utf-8');
       const nonce = Buffer.from(nonceBytes).toString('utf-8');
       

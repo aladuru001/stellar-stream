@@ -1651,6 +1651,54 @@ app.post(
   },
 );
 
+// POST /api/streams/:id/mark-complete â€” sender confirms a fully-vested
+// stream as complete, without waiting for the next refreshStreamStatuses() sweep
+app.post(
+  "/api/streams/:id/mark-complete",
+  mutationLimiter,
+  authMiddleware,
+  async (req: Request, res: Response) => {
+    const parsedId = parseStreamId(req.params.id);
+    if (!parsedId.ok) {
+      sendValidationError(req, res, parsedId.issues);
+      return;
+    }
+
+    const stream = getStream(parsedId.value);
+    if (!stream) {
+      sendApiError(req, res, 404, "Stream not found.", { code: "NOT_FOUND" });
+      return;
+    }
+
+    const user = (req as any).user;
+    if (stream.sender !== user.accountId) {
+      sendApiError(req, res, 403, "Only the sender can mark this stream complete.", {
+        code: "FORBIDDEN",
+      });
+      return;
+    }
+
+    try {
+      const updated = markStreamComplete(parsedId.value);
+      res.json({ data: { ...updated, progress: calculateProgress(updated) } });
+    } catch (error: any) {
+      const normalizedError = normalizeUnknownApiError(
+        error,
+        "Failed to mark stream complete.",
+      );
+      sendApiError(
+        req,
+        res,
+        normalizedError.statusCode,
+        normalizedError.message,
+        {
+          code: normalizedError.code ?? "INTERNAL_ERROR",
+        },
+      );
+    }
+  },
+);
+
 // POST /api/streams/:id/claim â€” recipient claims vested tokens
 app.post(
   "/api/streams/:id/claim",
@@ -2175,7 +2223,7 @@ async function startServer() {
   }
 
   startArchiveJob(config.archiveCronIntervalMs);
-  startDeadLetterPruningJob(config.webhookDeadLetterPruneIntervalMs);
+  startDeadLetterPruningJob();
   startStreamProgressBroadcaster(5000);
 
   const server = createServer(app);
