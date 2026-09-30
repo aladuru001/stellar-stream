@@ -1,10 +1,7 @@
 # Operational Runbook
 
 This runbook provides step-by-step procedures for common operational tasks in StellarStream.  
-For initial production setup, refer to the **[Deployment Guide](DEPLOYMENT.md)**.
-
-## Table of Contents
-
+For initial production setup, refer to the **[Deployment Guide](DEPLOYMENT.md)**.## Table of Contents
 1. [Reset SQLite Database](#reset-sqlite-database)
 2. [SQLite Restore from Backup](#sqlite-restore-from-backup)
 3. [Rotate JWT Secret](#rotate-jwt-secret)
@@ -15,9 +12,10 @@ For initial production setup, refer to the **[Deployment Guide](DEPLOYMENT.md)**
 8. [Indexer Monitoring Outcome Signal](#indexer-monitoring-outcome-signal)
 9. [Webhook Dead-Letter Spike](#webhook-dead-letter-spike)
 10. [Webhook Delivery Outcome Signal](#webhook-delivery-outcome-signal)
-11. [SQLite WAL Size Growth](#sqlite-wal-size-growth)
-12. [Contract Invocation Timeout](#contract-invocation-timeout)
-13. [Docker Compose Startup Failure](#docker-compose-startup-failure)
+11. [Secrets Rotation Outcome Signal](#secrets-rotation-outcome-signal)
+12. [SQLite WAL Size Growth](#sqlite-wal-size-growth)
+13. [Contract Invocation Timeout](#contract-invocation-timeout)
+14. [Docker Compose Startup Failure](#docker-compose-startup-failure)
 
 ---
 
@@ -283,15 +281,20 @@ cd backend && npx vitest run
 **Expected Output:**
 
 - All existing user sessions are invalidated.
-- Users will be prompted to re-connect their wallets and sign a new challenge.
-
-**Validation from Clean Environment:**
+- Users will be prompted to re-connect their wallets and sign a new challenge.**Validation from Clean Environment:**
 To verify the rotation works without undocumented local state:
-
 1. Provision a fresh backend instance (or container) with the new `JWT_SECRET` only
 2. No database migration or prior state required - the secret is read at startup
 3. Issue a new challenge via `GET /api/auth/challenge` and complete auth flow
 4. Verify `POST /api/auth/token` returns a valid JWT signed with the new secret.
+5. Read the outcome signal (see [Secrets Rotation Outcome Signal](#secrets-rotation-outcome-signal)):
+   ```bash
+   curl -s -H "Authorization: Bearer <ADMIN_TOKEN>" \
+     "http://localhost:3001/api/secrets-rotation/monitoring?credential=jwt_secret" | jq .outcome
+   # Expected after rotation completes: "success"
+   # While pre-rotation tokens are still accepted: "transient_delay"
+   # If new-credential artifacts are rejected: "blocked" — restart once and re-check.
+   ```
 
 ---
 
@@ -319,19 +322,22 @@ To verify the rotation works without undocumented local state:
 
 - All existing SEP-10 challenges issued with the old key become invalid.
 - New challenges via `GET /api/auth/challenge` are signed with the new key.
-- Clients must request a new challenge and re-sign to authenticate.
-
-**Validation from Clean Environment:**
+- Clients must request a new challenge and re-sign to authenticate.**Validation from Clean Environment:**
 To verify the rotation works without undocumented local state:
-
 1. Provision a fresh backend instance (or container) with the new `SERVER_SIGNING_KEY` only
 2. No database migration or prior state required - the key is read at startup
 3. Issue a new challenge via `GET /api/auth/challenge?accountId=<client>`
 4. Client signs the challenge and submits via `POST /api/auth/token`
 5. Verify a valid JWT is returned (signed with current `JWT_SECRET`)
+6. Read the outcome signal (see [Secrets Rotation Outcome Signal](#secrets-rotation-outcome-signal)):
+   ```bash
+   curl -s -H "Authorization: Bearer <ADMIN_TOKEN>" \
+     "http://localhost:3001/api/secrets-rotation/monitoring?credential=server_signing_key" | jq .outcome
+   # Expected after rotation completes: "success"
+   ```
 
 **Note on Combined Rotation:**
-Both `JWT_SECRET` and `SERVER_SIGNING_KEY` can be rotated simultaneously by updating both environment variables and restarting once. The order of operations does not matter as both are loaded at startup.
+Both `JWT_SECRET` and `SERVER_SIGNING_KEY` can be rotated simultaneously by updating both environment variables and restarting once. The order of operations does not matter as both are loaded at startup. Verify with `GET /api/secrets-rotation/monitoring?credential=both` (or omit the parameter) — see [Secrets Rotation Outcome Signal](#secrets-rotation-outcome-signal).
 
 ---
 
@@ -610,6 +616,62 @@ an explicit owner action instead of raw counters.
 1. `blocked` with `counts.deadLetters > 0` — the destination has remained unavailable. Follow [Webhook Dead-Letter Spike](#webhook-dead-letter-spike).
 2. `blocked` with `counts.pending > 0` and no destination configured — set `WEBHOOK_DESTINATION_URL` in the backend `.env` and restart the service.
 3. `transient_delay` — take no action while the queued count is falling. If it stops draining, inspect the worker log for `webhook delivery scheduled for retry` and confirm the destination is reachable.
+
+---
+
+### Secrets Rotation Outcome Signal
+
+**Symptoms:**
+
+- Alert on the `secrets_rotation_outcome` Prometheus gauge changing from `0`.
+- `GET /api/secrets-rotation/monitoring` returns `outcome: "blocked"`.
+- Users report being logged out repeatedly during a `JWT_SECRET` / `SERVER_SIGNING_KEY` rotation.
+
+This is the observable state of the rotation procedure documented in
+[Rotate JWT Secret](#rotate-jwt-secret) and [Rotate Server Signing Key](#rotate-server-signing-key).
+The backend records that a credential was provisioned at startup (never its value) and
+classifies the rollout so an operator can tell a completed rotation from one that still
+needs attention.
+
+**Outcome meanings:**
+
+| Outcome           | Gauge value | Meaning                                                                                                                            | Owner action                                                                                                         |
+| ----------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `success`         | 0           | No rotation recorded (fresh process), or the rotation completed: artifacts signed with the previous credential are rejected.        | None.                                                                                                                |
+| `transient_delay` | 1           | Old-credential artifacts (tokens or challenges) are still being accepted. Expected while outstanding sessions and in-flight challenges clear. | None while the stale-acceptance count falls toward zero; it clears as clients re-authenticate.                     |
+| `blocked`         | 2           | Fresh-credential artifacts are being rejected: the configured credential failed validation, or the restart step was missed.          | Follow the runbook rotation steps: correct the credential value, restart the backend **once**, and re-read the signal. Do not restart in a loop. |
+
+**Diagnosis:**
+
+1. Read the signal. It reports enumerated state and counts only — never a secret value, a token, a signature, or a raw verification message, so it is safe to paste into an incident channel:
+   ```bash
+   # Whole-process signal (latest rotation of any credential)
+   curl -s -H "Authorization: Bearer <ADMIN_TOKEN>" \
+     http://localhost:3001/api/secrets-rotation/monitoring | jq
+
+   # Scoped to one credential (jwt_secret | server_signing_key | both)
+   curl -s -H "Authorization: Bearer <ADMIN_TOKEN>" \
+     "http://localhost:3001/api/secrets-rotation/monitoring?credential=jwt_secret" | jq
+   ```
+2. Cross-check the gauge on the Prometheus scrape:
+   ```bash
+   curl -s http://localhost:3001/metrics | grep secrets_rotation_outcome
+   ```
+3. `stale_accepted=true` / `fresh_rejected=true` query parameters let an operator or
+   automated check feed an observation in (e.g. from an auth attempt with a pre-rotation
+   token) without ever passing the credential itself. The endpoint never verifies
+   credentials and never echoes anything secret.
+
+**Remediation:**
+
+1. `blocked` — re-run the rotation procedure from the top: generate the new credential,
+   update `JWT_SECRET` / `SERVER_SIGNING_KEY` in the environment, and restart once. The
+   signal returns to `success` when the process runs on the new credential.
+2. `transient_delay` persisting beyond the session lifetime — confirm the restart
+   actually happened (`rotationCount` should have incremented at startup); if clients
+   still hold old artifacts, force re-authentication or wait for expiry.
+3. After any rotation, record what was rotated and when, and confirm the signal reads
+   `success` (gauge `0`) before closing the change window.
 
 ---
 
