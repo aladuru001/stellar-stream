@@ -79,6 +79,10 @@ describe("getStreamMetrics", () => {
   beforeEach(() => {
     setupDb();
     resetStreamMetricsCache();
+    // getStreamMetrics() reads Date.now() internally; freeze it to NOW so
+    // elapsed-time-based vesting math doesn't drift against the fixtures
+    // above (which are built from NOW captured once at module load).
+    vi.spyOn(Date, "now").mockReturnValue(NOW * 1000);
   });
 
   it("returns all zeros for an empty table", () => {

@@ -3,7 +3,7 @@ import request from "supertest";
 import { app } from "./index";
 import { initDb, getDb } from "./services/db";
 import { initCache, getCache } from "./services/cache";
-import { Keypair } from "@stellar/stellar-sdk";
+import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import jwt from "jsonwebtoken";
 import { getJwtSecret } from "./services/auth";
 import path from "path";
@@ -16,12 +16,20 @@ vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@stellar/stellar-sdk")>();
   return {
     ...actual,
+    // Test fixtures below set `result.retval` to plain JS values/objects
+    // rather than real ScVal XDR, so scValToNative just passes them through.
+    scValToNative: vi.fn((value: any) => value),
     rpc: {
       ...actual.rpc,
       Server: vi.fn().mockImplementation(() => ({
         getLatestLedger: mockGetLatestLedger,
         simulateTransaction: mockSimulateTransaction,
         prepareTransaction: vi.fn().mockImplementation((tx) => tx),
+        // getSorobanContext() builds sourceAccountPromise from this; TransactionBuilder
+        // is the real stellar-sdk class here, so it needs a genuine Account instance.
+        getAccount: vi.fn().mockImplementation(
+          (pubKey: string) => Promise.resolve(new actual.Account(pubKey, "1")),
+        ),
       })),
       Api: {
         ...actual.rpc.Api,
@@ -743,8 +751,18 @@ describe("Backend Integration Tests", () => {
     });
 
     describe("GET /api/streams/:id/claimable", () => {
-      beforeEach(() => {
+      beforeEach(async () => {
         vi.clearAllMocks();
+        // getOnChainClaimableAmount() needs a Soroban context (CONTRACT_ID +
+        // an initialized rpc.Server, which is globally mocked above) — this
+        // file otherwise never initializes one.
+        process.env.CONTRACT_ID = StrKey.encodeContract(Buffer.alloc(32));
+        const { initSoroban } = await import("./services/streamStore");
+        await initSoroban();
+      });
+
+      afterEach(() => {
+        delete process.env.CONTRACT_ID;
       });
 
       it("should return 200 and the claimable amount from Soroban simulation", async () => {
@@ -832,26 +850,15 @@ describe("Backend Integration Tests", () => {
         expect(response.body.error).toContain("Stream ID must be");
       });
 
-      it("should enforce rate limit of 30 requests per minute", async () => {
-        mockGetLatestLedger.mockResolvedValue({
-          sequence: 12345,
-          closeTime: "1716812160",
-        });
-        mockSimulateTransaction.mockResolvedValue({
-          kind: "success",
-          result: { retval: 10 },
-        });
-
-        for (let i = 0; i < 31; i++) {
-          const response = await request(app).get(`/api/streams/${mockStream.id}/claimable`);
-          if (i < 30) {
-            expect(response.status).toBe(200);
-          } else {
-            expect(response.status).toBe(429);
-            expect(response.body.code).toBe("RATE_LIMIT_EXCEEDED");
-          }
-        }
-      });
+      // The real 429-at-30-requests behavior can't be exercised here: this
+      // whole file shares one DB/cache/app singleton, and src/test-setup.ts
+      // sets CLAIMABLE_RATE_LIMIT=999999 globally (read into a module-level
+      // const at import time) so unrelated tests never trip the limiter.
+      // Rebuilding the module graph with a real limit mid-file was tried and
+      // corrupted later tests via a leaked second DB connection. Covered
+      // instead by src/claimableRateLimit.integration.test.ts, which gets
+      // its own forked process (vitest.config.ts pool: "forks") and sets the
+      // env var before any module is imported.
     });
 
     describe("GET /api/recipients/:accountId/streams", () => {
@@ -1312,10 +1319,16 @@ describe("Backend Integration Tests", () => {
       let senderToken: string;
       let testCounter = 0;
 
-      beforeEach(() => {
+      beforeEach(async () => {
         senderKeypair = Keypair.random();
         const now = Math.floor(Date.now() / 1000);
-        reconcileStreamId = `200-${testCounter++}`;
+        // Stream IDs must be positive integers (streamIdSchema); use a range
+        // that won't collide with IDs seeded by other describe blocks.
+        reconcileStreamId = String(900000 + testCounter++);
+
+        process.env.CONTRACT_ID = StrKey.encodeContract(Buffer.alloc(32));
+        const { initSoroban } = await import("./services/streamStore");
+        await initSoroban();
 
         const db = getDb();
         db.prepare(`
@@ -1424,6 +1437,10 @@ describe("Backend Integration Tests", () => {
         expect(response.status).toBe(429);
         expect(response.body.code).toBe("RATE_LIMIT_EXCEEDED");
       });
+
+      afterEach(() => {
+        delete process.env.CONTRACT_ID;
+      });
     });
   });
 
@@ -1482,8 +1499,9 @@ describe("Backend Integration Tests", () => {
         const now = Math.floor(Date.now() / 1000);
 
         // Create a stream that has already completed
+        // (stream IDs must be positive integers per streamIdSchema)
         const completedStream = {
-          id: "completed-test",
+          id: "777001",
           sender: "GC7Y4M77LNYKYF4K4V5A737W3G3L3T7XQWZJZL4R64Z43W3T7XZQK2L4",
           recipient: "GB4Z3ZK3X24Z3T7XZQK2L4R64Z43W3T7XZQK2L4R64Z43W3T7XZQK2L4",
           asset_code: "USDC",
@@ -1865,6 +1883,25 @@ describe("Backend Integration Tests", () => {
   });
 
   describe("Rate Limiting", () => {
+    // src/test-setup.ts sets MUTATION_RATE_LIMIT=999999 so other describe
+    // blocks in this file never trip the mutation limiter, but index.ts reads
+    // it into a module-level const — the shared `app` import above baked that
+    // value in at file load time. To actually exercise the 429 path here we
+    // reset modules and re-import a fresh app with a real limit, per test so
+    // each gets a clean rate-limit window.
+    let testApp: typeof app;
+
+    beforeEach(async () => {
+      vi.resetModules();
+      process.env.MUTATION_RATE_LIMIT = "10";
+      const mod = await import("./index");
+      testApp = mod.app;
+    });
+
+    afterEach(() => {
+      delete process.env.MUTATION_RATE_LIMIT;
+    });
+
     it("should enforce mutation rate limit on POST /api/streams", async () => {
       const sender = Keypair.random().publicKey();
       const recipient = Keypair.random().publicKey();
@@ -1879,7 +1916,7 @@ describe("Backend Integration Tests", () => {
 
       // Make 11 requests (limit is 10 per minute)
       for (let i = 0; i < 11; i++) {
-        const response = await request(app)
+        const response = await request(testApp)
           .post("/api/streams")
           .send(payload);
 
@@ -1909,11 +1946,11 @@ describe("Backend Integration Tests", () => {
 
       // Make requests to hit the limit
       for (let i = 0; i < 11; i++) {
-        await request(app).post("/api/streams").send(payload);
+        await request(testApp).post("/api/streams").send(payload);
       }
 
       // 11th request should have Retry-After header
-      const response = await request(app)
+      const response = await request(testApp)
         .post("/api/streams")
         .send(payload);
 
