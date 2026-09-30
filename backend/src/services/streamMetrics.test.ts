@@ -1,11 +1,10 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import Database from "better-sqlite3";
 import { vi } from "vitest";
+import { getStreamMetrics, resetStreamMetricsCache } from "./streamMetrics";
 
 let db: InstanceType<typeof Database>;
 vi.mock("./db", () => ({ getDb: () => db }));
-
-const { getStreamMetrics, resetStreamMetricsCache } = await import("./streamMetrics");
 
 function setupDb() {
   db = new Database(":memory:");

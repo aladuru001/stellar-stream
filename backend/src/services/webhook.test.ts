@@ -73,7 +73,7 @@ describe("Webhook triggerWebhook and getDeadLetters", () => {
     let originalEnvUrl: string | undefined;
 
     beforeEach(() => {
-        process.env.DB_PATE = TEST_DB_PATE;
+        process.env.DB_PATH = TEST_DB_PATH;
         initDb();
         const db = getDb();
         db.exec("DELETE FROM stream_events");
@@ -91,7 +91,7 @@ describe("Webhook triggerWebhook and getDeadLetters", () => {
     afterEach(() => {
         const db = getDb();
         db.close();
-        if (fs.existsSync(TEST_DB_PATE)) {
+        if (fs.existsSync(TEST_DB_PATH)) {
             fs.unlinkSync(TEST_DB_PATH);
         }
         process.env.WEBHOOK_DESTINATION_URL = originalEnvUrl;

@@ -321,6 +321,68 @@ export function syncFtsIndex(id: string, sender: string, recipient: string, asse
 }
 
 /**
+ * Case-insensitive substring search across stream id, sender, recipient, and
+ * assetCode. Returns matching stream IDs ordered newest-first. See the
+ * GET /api/streams/search docblock in index.ts for the full contract.
+ */
+export function searchStreamsFts(query: string): string[] {
+  const database = getDb();
+  const like = `%${query.toLowerCase()}%`;
+  const rows = database
+    .prepare(
+      `SELECT id FROM streams
+       WHERE lower(id) LIKE ? OR lower(sender) LIKE ? OR lower(recipient) LIKE ? OR lower(asset_code) LIKE ?
+       ORDER BY created_at DESC`,
+    )
+    .all(like, like, like, like) as Array<{ id: string }>;
+  return rows.map((row) => row.id);
+}
+
+/** Returns the currently allowed asset codes, in the order they were added. */
+export function getAllowedAssets(): string[] {
+  const database = getDb();
+  const rows = database
+    .prepare("SELECT code FROM allowed_assets ORDER BY id")
+    .all() as Array<{ code: string }>;
+  return rows.map((row) => row.code);
+}
+
+/** Adds an asset code to the allowlist. A no-op if the code is already present. */
+export function addAllowedAsset(code: string): void {
+  const database = getDb();
+  database.prepare("INSERT OR IGNORE INTO allowed_assets (code) VALUES (?)").run(code);
+}
+
+/** Removes an asset code from the allowlist. A no-op if the code isn't present. */
+export function removeAllowedAsset(code: string): void {
+  const database = getDb();
+  database.prepare("DELETE FROM allowed_assets WHERE code = ?").run(code);
+}
+
+/**
+ * Seeds the allowed_assets table from the ALLOWED_ASSETS env var (default
+ * "USDC,XLM") the first time it's empty. Subsequent starts leave whatever
+ * has since been added/removed via the admin endpoints untouched.
+ */
+function seedAllowedAssetsIfEmpty(database: any): void {
+  const { count } = database
+    .prepare("SELECT COUNT(*) as count FROM allowed_assets")
+    .get() as { count: number };
+  if (count > 0) return;
+
+  const raw = process.env.ALLOWED_ASSETS || "USDC,XLM";
+  const codes = raw
+    .split(",")
+    .map((code) => code.trim().toUpperCase())
+    .filter(Boolean);
+
+  const insert = database.prepare("INSERT OR IGNORE INTO allowed_assets (code) VALUES (?)");
+  for (const code of codes) {
+    insert.run(code);
+  }
+}
+
+/**
  * Adds a column to a table if it doesn't already exist.
  * Safe for both SQLite and Postgres.
  */
@@ -394,4 +456,6 @@ export function initDb(): void {
   // Incremental schema patches for columns added after the baseline.
   addColumnIfMissing(db, "streams", "cliff_seconds", "INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "stream_archive", "cliff_seconds", "INTEGER NOT NULL DEFAULT 0");
+
+  seedAllowedAssetsIfEmpty(db);
 }
