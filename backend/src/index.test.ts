@@ -11,14 +11,30 @@ const RECIPIENT_1 = Keypair.random().publicKey();
 const RECIPIENT_2 = Keypair.random().publicKey();
 
 const streamStoreMocks = vi.hoisted(() => ({
+  archiveOldStreams: vi.fn(),
   calculateProgress: vi.fn(),
   cancelStream: vi.fn(),
+  compareStreams: vi.fn(),
+  MIN_COMPARE_STREAMS: 2,
+  MAX_COMPARE_STREAMS: 5,
   createStream: vi.fn(),
+  deleteStreamById: vi.fn(),
   getStream: vi.fn(),
+  getOnChainClaimableAmount: vi.fn(),
+  getOnChainClaimableBatch: vi.fn(),
+  getLatestLedgerTime: vi.fn(),
+  getOnChainStreamCount: vi.fn(),
   initSoroban: vi.fn(),
   listStreams: vi.fn(),
+  listStreamsByRecipient: vi.fn(),
   listStreamsBySender: vi.fn(),
+  markStreamComplete: vi.fn(),
   nowInSeconds: vi.fn(() => 1000),
+  pauseStream: vi.fn(),
+  estimateCreateStreamFee: vi.fn(),
+  reconcileStream: vi.fn(),
+  refreshStreamStatuses: vi.fn(),
+  resumeStream: vi.fn(),
   syncStreams: vi.fn(),
   updateStreamStartAt: vi.fn(),
 }));
@@ -41,7 +57,15 @@ const eventHistoryMocks = vi.hoisted(() => ({
   getStreamEventSummary: vi.fn(),
 }));
 
+const dbMocks = vi.hoisted(() => ({
+  searchStreamsFts: vi.fn(),
+  getAllowedAssets: vi.fn(() => ["USDC", "XLM"]),
+  addAllowedAsset: vi.fn(),
+  removeAllowedAsset: vi.fn(),
+}));
+
 vi.mock("./services/streamStore", () => streamStoreMocks);
+vi.mock("./services/db", () => dbMocks);
 vi.mock("./services/eventHistory", () => eventHistoryMocks);
 vi.mock("./services/cache", () => cacheMocks);
 vi.mock("./services/auth", () => ({
@@ -816,7 +840,7 @@ describe("GET /api/events", () => {
     expect(status).toBe(200);
     expect(body.total).toBe(4);
     expect(body.page).toBe(1);
-    expect(body.limit).toBe(4);
+    expect(body.limit).toBe(20);
     expect(body.data).toHaveLength(4);
     expect(body.data[0].streamId).toBe("stream-1");
   });
@@ -830,7 +854,7 @@ describe("GET /api/events", () => {
 
     expect(status).toBe(200);
     expect(body.total).toBe(2);
-    expect(eventHistoryMocks.countAllEvents).toHaveBeenCalledWith("created");
+    expect(eventHistoryMocks.countAllEvents).toHaveBeenCalledWith("created", undefined, undefined);
 
   });
 

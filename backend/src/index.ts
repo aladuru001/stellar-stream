@@ -76,6 +76,8 @@ import {
   estimateCreateStreamFee,
   refreshStreamStatuses,
   resumeStream,
+  SortField,
+  SortOrder,
   StreamRecord,
   StreamStatus,
   syncStreams,
@@ -180,11 +182,25 @@ const listStreamsQuerySchema = z.object({
     )
     .optional(),
   sort: z
-    .enum(SORT_FIELDS)
-    .optional(),
+    .string()
+    .optional()
+    .refine(
+      (value) => value === undefined || SORT_FIELDS.includes(value as (typeof SORT_FIELDS)[number]),
+      {
+        message: `sort must be one of: ${SORT_FIELDS.join(", ")}`,
+      },
+    )
+    .transform((value) => value as SortField | undefined),
   order: z
-    .enum(SORT_ORDERS)
-    .optional(),
+    .string()
+    .optional()
+    .refine(
+      (value) => value === undefined || SORT_ORDERS.includes(value as (typeof SORT_ORDERS)[number]),
+      {
+        message: `order must be one of: ${SORT_ORDERS.join(", ")}`,
+      },
+    )
+    .transform((value) => value as SortOrder | undefined),
 });
 
 const AUTH_CHALLENGE_RATE_LIMIT = Number(
@@ -568,11 +584,20 @@ app.get("/api/streams", readLimiter, async (req: Request, res: Response) => {
   const hasPage = req.query.page !== undefined;
   const hasLimit = req.query.limit !== undefined;
 
-  const now = nowInSeconds();
-  let data = listStreams(query.include_archived, query.sort ?? "createdAt", query.order ?? "desc").map((stream) => ({
-    ...stream,
-    progress: calculateProgress(stream, now),
-  }));
+  let data: any[];
+  try {
+    const now = nowInSeconds();
+    data = listStreams(query.include_archived, query.sort ?? "createdAt", query.order ?? "desc").map((stream) => ({
+      ...stream,
+      progress: calculateProgress(stream, now),
+    }));
+  } catch (error: any) {
+    const normalizedError = normalizeUnknownApiError(error, "Failed to list streams.");
+    sendApiError(req, res, normalizedError.statusCode, normalizedError.message, {
+      code: normalizedError.code ?? "INTERNAL_ERROR",
+    });
+    return;
+  }
 
   if (query.status) {
     data = data.filter((stream) => stream.progress.status === query.status);
@@ -875,6 +900,47 @@ app.post(
       const normalizedError = normalizeUnknownApiError(
         error,
         "Failed to simulate claimable amounts.",
+      );
+      sendApiError(
+        req,
+        res,
+        normalizedError.statusCode,
+        normalizedError.message,
+        { code: normalizedError.code ?? "INTERNAL_ERROR" },
+      );
+    }
+  },
+);
+
+app.get(
+  "/api/streams/:id/claimable",
+  claimableLimiter,
+  async (req: Request, res: Response) => {
+    const parsedId = parseStreamId(req.params.id);
+    if (!parsedId.ok) {
+      sendValidationError(req, res, parsedId.issues);
+      return;
+    }
+
+    const stream = getStream(parsedId.value);
+    if (!stream) {
+      sendApiError(req, res, 404, "Stream not found.", { code: "NOT_FOUND" });
+      return;
+    }
+
+    try {
+      const { claimableAmount, at } = await getOnChainClaimableAmount(parsedId.value);
+      res.json({
+        streamId: stream.id,
+        claimableAmount,
+        assetCode: stream.assetCode,
+        at,
+      });
+    } catch (error: unknown) {
+      logger.error({ err: error }, "failed to simulate claimable amount");
+      const normalizedError = normalizeUnknownApiError(
+        error,
+        "Failed to simulate claimable amount.",
       );
       sendApiError(
         req,

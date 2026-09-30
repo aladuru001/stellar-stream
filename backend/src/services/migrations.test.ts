@@ -175,6 +175,6 @@ describe("database migrations", () => {
       .prepare("SELECT version FROM schema_migrations ORDER BY version")
       .all() as Array<{ version: number }>;
 
-    expect(applied.map((row) => row.version)).toEqual([1, 2, 3]);
+    expect(applied.map((row) => row.version)).toEqual([1, 2, 3, 5]);
   });
 });
