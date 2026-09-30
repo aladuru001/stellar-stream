@@ -90,6 +90,9 @@ export function classifyRpcFailure(err: unknown): IndexerRpcFailureKind {
   if (
     statusCode === 503 ||
     statusCode === 504 ||
+    text.includes("503") ||
+    text.includes("504") ||
+    text.includes("service unavailable") ||
     text.includes("econnrefused") ||
     text.includes("econnreset") ||
     text.includes("etimedout") ||
@@ -544,7 +547,7 @@ function processEvent(db: any, event: rpc.Api.EventResponse): void {
     const topic = event.topic.map((t: any) => scValToNative(t));
     const value = scValToNative(event.value);
 
-    if (topic.length < 2) return;
+    if (topic.length < 2 || topic[0] !== "Stream") return;
 
     const eventName = topic[1];
     const timestamp = Math.floor(new Date(event.ledgerClosedAt).getTime() / 1000);

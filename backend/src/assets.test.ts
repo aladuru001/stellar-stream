@@ -7,6 +7,25 @@ import { Keypair } from "@stellar/stellar-sdk";
 
 const TEST_DB_PATH = path.join(__dirname, "..", "data", "test-assets.db");
 
+// SQLite in WAL mode (which initDb() enables) writes new rows to a
+// `-wal` companion file before they're checkpointed back into the main
+// file. Deleting only TEST_DB_PATH between tests can leave a previous
+// test's `-wal`/`-shm` files behind, which the next test's fresh
+// connection can pick back up — e.g. leaking one test's ALLOWED_ASSETS
+// seed into the next test's "expect the defaults" assertion.
+function removeTestDbFiles(): void {
+  for (const suffix of ["", "-wal", "-shm"]) {
+    const filePath = TEST_DB_PATH + suffix;
+    if (fs.existsSync(filePath)) {
+      try {
+        fs.unlinkSync(filePath);
+      } catch (err) {
+        // Ignore
+      }
+    }
+  }
+}
+
 describe("Assets API Configuration", () => {
   beforeAll(() => {
     process.env.DB_PATH = TEST_DB_PATH;
@@ -14,15 +33,20 @@ describe("Assets API Configuration", () => {
     process.env.ADMIN_API_KEY = "test-admin-api-key-32-characters-minimum";
   });
 
-  beforeEach(() => {
-    vi.resetModules();
-    if (fs.existsSync(TEST_DB_PATH)) {
-      try {
-        fs.unlinkSync(TEST_DB_PATH);
-      } catch (err) {
-        // Ignore
-      }
+  beforeEach(async () => {
+    // The previous test's better-sqlite3 connection is never explicitly
+    // closed, so its open file handle can keep the OS from fully releasing
+    // TEST_DB_PATH even after unlinking it — the next test's fresh
+    // connection can then still see the old file's data. Close it (via the
+    // not-yet-reset module from the previous test) before resetting.
+    try {
+      const { getDb } = await import("./services/db");
+      getDb().close();
+    } catch {
+      // No db open yet (first test), or already closed — fine either way.
     }
+    vi.resetModules();
+    removeTestDbFiles();
   });
 
   afterEach(() => {
@@ -30,13 +54,7 @@ describe("Assets API Configuration", () => {
   });
 
   afterAll(() => {
-    if (fs.existsSync(TEST_DB_PATH)) {
-      try {
-        fs.unlinkSync(TEST_DB_PATH);
-      } catch (err) {
-        // Ignore
-      }
-    }
+    removeTestDbFiles();
   });
 
   it("should respect ALLOWED_ASSETS environment variable override and normalize", async () => {
